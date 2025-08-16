@@ -15,6 +15,7 @@ const FILES_DIR = path.join(BASE_DIR, 'whatsapp-bot-files');
 const CONFIG_FILE = path.join(BASE_DIR, 'whatsapp-bot-config.json');
 const PROGRESS_FILE = path.join(BASE_DIR, 'whatsapp-bot-progress.json');
 const BACKUP_DIR = path.join(BASE_DIR, 'whatsapp-bot-backups');
+const RESPONSES_FILE = path.join(BASE_DIR, 'whatsapp-bot-responses.json');
 
 // Cores para o console
 const colors = {
@@ -50,6 +51,10 @@ function setupDirectories() {
     if (!fs.existsSync(PROGRESS_FILE)) {
         fs.writeFileSync(PROGRESS_FILE, JSON.stringify({ lastIndex: 0 }, null, 2));
     }
+
+    if (!fs.existsSync(RESPONSES_FILE)) {
+        fs.writeFileSync(RESPONSES_FILE, JSON.stringify({}, null, 2));
+    }
 }
 
 // Estado do sistema
@@ -70,6 +75,27 @@ let clientReady = false;
 let qrCodeGenerated = false;
 let currentQrCode = null;
 let client = null;
+
+// Carregar respostas automáticas
+function loadResponses() {
+    try {
+        return JSON.parse(fs.readFileSync(RESPONSES_FILE));
+    } catch (err) {
+        colorLog('error', '[ERRO] Falha ao carregar respostas:', err);
+        return {};
+    }
+}
+
+// Salvar respostas automáticas
+function saveResponses(responses) {
+    try {
+        fs.writeFileSync(RESPONSES_FILE, JSON.stringify(responses, null, 2));
+        return true;
+    } catch (err) {
+        colorLog('error', '[ERRO] Falha ao salvar respostas:', err);
+        return false;
+    }
+}
 
 // Inicializa o cliente WhatsApp
 function initializeClient() {
@@ -138,6 +164,21 @@ function initializeClient() {
         if (config.autoReconnect) {
             colorLog('info', '[RECONEXÃO] Tentando reconectar automaticamente em 5 segundos...');
             setTimeout(() => initializeClient(), 5000);
+        }
+    });
+
+    newClient.on('message', async msg => {
+        if (!msg.fromMe) {
+            const responses = loadResponses();
+            const receivedText = msg.body.toLowerCase().trim();
+            
+            for (const [pergunta, resposta] of Object.entries(responses)) {
+                if (receivedText.includes(pergunta.toLowerCase())) {
+                    await msg.reply(resposta);
+                    colorLog('info', `[AUTO-RESPOSTA] Para "${pergunta}": "${resposta}"`);
+                    break;
+                }
+            }
         }
     });
 
@@ -210,6 +251,47 @@ rl.on('line', async input => {
             dynamicDelay = delay;
             fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
             colorLog('success', `[CONFIG] Delay entre mensagens atualizado para ${delay}ms`);
+
+        } else if (cmd.startsWith('$pergunta=')) {
+            const parts = cmd.split('$resposta=');
+            if (parts.length !== 2) return colorLog('error', '[ERRO] Formato inválido. Use: $pergunta=Pergunta $resposta=Resposta');
+            
+            const pergunta = parts[0].replace('$pergunta=', '').trim();
+            const resposta = parts[1].trim();
+            
+            if (!pergunta || !resposta) return colorLog('error', '[ERRO] Pergunta e resposta não podem estar vazias.');
+            
+            const responses = loadResponses();
+            responses[pergunta] = resposta;
+            
+            if (saveResponses(responses)) {
+                colorLog('success', `[AUTO-RESPOSTA] Configurado: "${pergunta}" → "${resposta}"`);
+            }
+
+        } else if (cmd.startsWith('$removerpergunta=')) {
+            const pergunta = cmd.replace('$removerpergunta=', '').trim();
+            if (!pergunta) return colorLog('error', '[ERRO] Especifique a pergunta a ser removida.');
+            
+            const responses = loadResponses();
+            if (responses.hasOwnProperty(pergunta)) {
+                delete responses[pergunta];
+                if (saveResponses(responses)) {
+                    colorLog('success', `[AUTO-RESPOSTA] Removido: "${pergunta}"`);
+                }
+            } else {
+                colorLog('warning', `[AUTO-RESPOSTA] Pergunta "${pergunta}" não encontrada.`);
+            }
+
+        } else if (cmd === '$listarperguntas') {
+            const responses = loadResponses();
+            if (Object.keys(responses).length === 0) {
+                colorLog('info', '[AUTO-RESPOSTA] Nenhuma pergunta configurada.');
+            } else {
+                colorLog('info', '[AUTO-RESPOSTAS CONFIGURADAS]');
+                for (const [pergunta, resposta] of Object.entries(responses)) {
+                    console.log(`- "${pergunta}" → "${resposta}"`);
+                }
+            }
 
         } else if (cmd === '$pause') {
             if (!isSending) return colorLog('error', '[ERRO] Nenhum envio em andamento.');
@@ -423,7 +505,8 @@ async function backupProgress() {
             config: JSON.parse(fs.readFileSync(CONFIG_FILE)),
             contacts: contatos,
             progress: JSON.parse(fs.readFileSync(PROGRESS_FILE)),
-            sendingStatus: currentSending
+            sendingStatus: currentSending,
+            responses: loadResponses()
         };
         
         fs.writeFileSync(backupFile, JSON.stringify(backupData, null, 2));
@@ -500,6 +583,10 @@ function showHelp() {
 ║  $global=mensagem + arq.ext → Msg + arquivo║
 ║  $file=arquivo.ext          → Envia arquivo║
 ║  $delay=XXXX                → Altera delay ║
+╠════════════════════════════════════════════╣
+║  $pergunta=Pergunta $resposta=Resposta     ║
+║  $removerpergunta=Pergunta  → Remove resp. ║
+║  $listarperguntas           → Lista resp.  ║
 ╠════════════════════════════════════════════╣
 ║  $pause          → Pausa envio             ║
 ║  $resume         → Retoma envio            ║
