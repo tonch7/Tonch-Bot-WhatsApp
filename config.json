@@ -1,0 +1,4 @@
+{
+  "delayBetweenMessages": 2000,
+  "maxRetries": 3
+}
