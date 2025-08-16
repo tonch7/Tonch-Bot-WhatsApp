@@ -16,6 +16,7 @@ const CONFIG_FILE = path.join(BASE_DIR, 'whatsapp-bot-config.json');
 const PROGRESS_FILE = path.join(BASE_DIR, 'whatsapp-bot-progress.json');
 const BACKUP_DIR = path.join(BASE_DIR, 'whatsapp-bot-backups');
 const RESPONSES_FILE = path.join(BASE_DIR, 'whatsapp-bot-responses.json');
+const ADMINS_FILE = path.join(BASE_DIR, 'whatsapp-bot-admins.json');
 
 // Cores para o console
 const colors = {
@@ -55,6 +56,53 @@ function setupDirectories() {
     if (!fs.existsSync(RESPONSES_FILE)) {
         fs.writeFileSync(RESPONSES_FILE, JSON.stringify({}, null, 2));
     }
+
+    if (!fs.existsSync(ADMINS_FILE)) {
+        fs.writeFileSync(ADMINS_FILE, JSON.stringify([], null, 2));
+        colorLog('info', '[ADMIN] Nenhum admin configurado. Use $manageadmins para adicionar.');
+    }
+}
+
+// Carregar lista de admins
+function loadAdmins() {
+    try {
+        return JSON.parse(fs.readFileSync(ADMINS_FILE));
+    } catch (err) {
+        colorLog('error', '[ERRO] Falha ao carregar admins:', err);
+        return [];
+    }
+}
+
+// Salvar lista de admins
+function saveAdmins(admins) {
+    try {
+        fs.writeFileSync(ADMINS_FILE, JSON.stringify(admins, null, 2));
+        return true;
+    } catch (err) {
+        colorLog('error', '[ERRO] Falha ao salvar admins:', err);
+        return false;
+    }
+}
+
+// Carregar respostas automáticas
+function loadResponses() {
+    try {
+        return JSON.parse(fs.readFileSync(RESPONSES_FILE));
+    } catch (err) {
+        colorLog('error', '[ERRO] Falha ao carregar respostas:', err);
+        return {};
+    }
+}
+
+// Salvar respostas automáticas
+function saveResponses(responses) {
+    try {
+        fs.writeFileSync(RESPONSES_FILE, JSON.stringify(responses, null, 2));
+        return true;
+    } catch (err) {
+        colorLog('error', '[ERRO] Falha ao salvar respostas:', err);
+        return false;
+    }
 }
 
 // Estado do sistema
@@ -75,25 +123,121 @@ let clientReady = false;
 let qrCodeGenerated = false;
 let currentQrCode = null;
 let client = null;
+let admins = loadAdmins();
 
-// Carregar respostas automáticas
-function loadResponses() {
-    try {
-        return JSON.parse(fs.readFileSync(RESPONSES_FILE));
-    } catch (err) {
-        colorLog('error', '[ERRO] Falha ao carregar respostas:', err);
-        return {};
+// Funções para gerenciar admins
+async function manageAdmins() {
+    colorLog('info', '\n[ADMIN] Configuração de Administradores');
+    console.log('1. Adicionar admin');
+    console.log('2. Remover admin');
+    console.log('3. Listar admins');
+    console.log('4. Voltar');
+
+    const choice = await askQuestion('Escolha uma opção: ');
+    switch(choice) {
+        case '1':
+            await addAdmin();
+            break;
+        case '2':
+            await removeAdmin();
+            break;
+        case '3':
+            listAdmins();
+            break;
+        case '4':
+            return;
+        default:
+            colorLog('error', '[ERRO] Opção inválida.');
+    }
+    await manageAdmins();
+}
+
+async function addAdmin() {
+    const number = await askQuestion('Digite o número do admin (com código do país, ex: 5511999999999): ');
+    if (!number.match(/^\d+$/)) {
+        colorLog('error', '[ERRO] Número inválido. Use apenas dígitos.');
+        return;
+    }
+
+    const adminId = `${number}@c.us`;
+    if (admins.includes(adminId)) {
+        colorLog('warning', '[ADMIN] Este número já é admin.');
+        return;
+    }
+
+    admins.push(adminId);
+    if (saveAdmins(admins)) {
+        colorLog('success', `[ADMIN] Número ${number} adicionado como admin.`);
     }
 }
 
-// Salvar respostas automáticas
-function saveResponses(responses) {
+async function removeAdmin() {
+    if (admins.length === 0) {
+        colorLog('info', '[ADMIN] Nenhum admin cadastrado.');
+        return;
+    }
+
+    listAdmins();
+    const index = parseInt(await askQuestion('Digite o número do admin a ser removido (1, 2, ...): ')) - 1;
+    
+    if (isNaN(index) || index < 0 || index >= admins.length) {
+        colorLog('error', '[ERRO] Índice inválido.');
+        return;
+    }
+
+    const removed = admins.splice(index, 1);
+    if (saveAdmins(admins)) {
+        colorLog('success', `[ADMIN] Número ${removed[0].replace('@c.us', '')} removido.`);
+    }
+}
+
+function listAdmins() {
+    if (admins.length === 0) {
+        colorLog('info', '[ADMIN] Nenhum admin cadastrado.');
+        return;
+    }
+
+    colorLog('info', '\n[ADMINS CADASTRADOS]');
+    admins.forEach((admin, index) => {
+        console.log(`${index + 1}. ${admin.replace('@c.us', '')}`);
+    });
+}
+
+function askQuestion(question) {
+    return new Promise(resolve => {
+        rl.question(question, answer => {
+            resolve(answer.trim());
+        });
+    });
+}
+
+// Função para atualizar contatos
+async function updateContacts(clientInstance = client) {
     try {
-        fs.writeFileSync(RESPONSES_FILE, JSON.stringify(responses, null, 2));
-        return true;
+        const chats = await clientInstance.getChats();
+        contatos = chats.filter(c => !c.isGroup && !c.archived)
+            .map(c => ({ id: c.id._serialized, name: c.name || c.id.user }));
+        colorLog('success', `[CONTATOS] ${contatos.length} contatos carregados.`);
+    } catch (error) {
+        colorLog('error', '[ERRO] Falha ao buscar contatos:', error);
+    }
+}
+
+// Função para limpar sessão
+async function cleanSession() {
+    try {
+        if (client) {
+            await client.destroy().catch(err => {
+                colorLog('warning', '[AVISO] Erro ao destruir cliente:', err.message);
+            });
+        }
+        fs.rmSync(path.join(BASE_DIR, 'whatsapp-bot-session'), { 
+            recursive: true, 
+            force: true 
+        });
+        colorLog('success', '[SESSÃO] Limpeza completa da sessão anterior');
     } catch (err) {
-        colorLog('error', '[ERRO] Falha ao salvar respostas:', err);
-        return false;
+        colorLog('error', '[ERRO] Falha ao limpar sessão:', err);
     }
 }
 
@@ -168,16 +312,25 @@ function initializeClient() {
     });
 
     newClient.on('message', async msg => {
-        if (!msg.fromMe) {
-            const responses = loadResponses();
-            const receivedText = msg.body.toLowerCase().trim();
-            
-            for (const [pergunta, resposta] of Object.entries(responses)) {
-                if (receivedText.includes(pergunta.toLowerCase())) {
-                    await msg.reply(resposta);
-                    colorLog('info', `[AUTO-RESPOSTA] Para "${pergunta}": "${resposta}"`);
-                    break;
-                }
+        if (msg.fromMe) return;
+
+        // Verificar se é admin e processar comandos
+        const isAdmin = admins.includes(msg.from);
+        if (isAdmin && msg.body.startsWith('$')) {
+            colorLog('info', `[ADMIN CMD] ${msg.from.replace('@c.us', '')}: ${msg.body}`);
+            await processAdminCommand(msg.body, msg);
+            return;
+        }
+
+        // Respostas automáticas
+        const responses = loadResponses();
+        const receivedText = msg.body.toLowerCase().trim();
+        
+        for (const [pergunta, resposta] of Object.entries(responses)) {
+            if (receivedText.includes(pergunta.toLowerCase())) {
+                await msg.reply(resposta);
+                colorLog('info', `[AUTO-RESPOSTA] Para "${pergunta}": "${resposta}"`);
+                break;
             }
         }
     });
@@ -191,22 +344,381 @@ function initializeClient() {
     return newClient;
 }
 
-// Função para limpar sessão
-async function cleanSession() {
+// Processar comandos de admin
+async function processAdminCommand(cmd, msg) {
     try {
-        if (client) {
-            await client.destroy().catch(err => {
-                colorLog('warning', '[AVISO] Erro ao destruir cliente:', err.message);
-            });
+        if (cmd === '$help') {
+            await msg.reply(`
+*COMANDOS ADMIN:*
+$global=mensagem - Envia msg para todos
+$file=arquivo - Envia arquivo
+$delay=XXXX - Altera delay
+$pergunta=Pergunta $resposta=Resposta
+$removerpergunta=Pergunta
+$listarperguntas
+$pause - Pausa envios
+$resume - Retoma envios
+$status - Mostra status
+$updatecontacts - Atualiza contatos
+$reconnect - Reconecta
+$restart - Reinicia bot
+Veja mais com $help no console
+            `);
+        } else if (cmd.startsWith('$global=')) {
+            const data = cmd.replace('$global=', '').trim();
+            if (data.includes(' + ')) {
+                const [mensagem, arquivo] = data.split(' + ').map(v => v.trim());
+                const filepath = path.join(FILES_DIR, arquivo);
+                if (!fs.existsSync(filepath)) {
+                    await msg.reply(`[ERRO] Arquivo '${arquivo}' não encontrado.`);
+                    return;
+                }
+                await enviarMensagemArquivoParaTodos(mensagem, filepath, arquivo);
+            } else {
+                await enviarMensagemParaTodos(data);
+            }
+            await msg.reply(`[SUCESSO] Mensagem enviada para ${contatos.length} contatos.`);
+        } else if (cmd.startsWith('$file=')) {
+            const filename = cmd.replace('$file=', '').trim();
+            const filepath = path.join(FILES_DIR, filename);
+            if (!fs.existsSync(filepath)) {
+                await msg.reply(`[ERRO] Arquivo '${filename}' não encontrado.`);
+                return;
+            }
+            await enviarArquivoParaTodos(filepath, filename);
+            await msg.reply(`[SUCESSO] Arquivo enviado para ${contatos.length} contatos.`);
+        } else if (cmd.startsWith('$delay=')) {
+            const delay = parseInt(cmd.replace('$delay=', '').trim());
+            if (isNaN(delay) || delay < 500) {
+                await msg.reply('[ERRO] Delay inválido (mínimo 500ms).');
+                return;
+            }
+            const config = JSON.parse(fs.readFileSync(CONFIG_FILE));
+            config.delayBetweenMessages = delay;
+            dynamicDelay = delay;
+            fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+            await msg.reply(`[CONFIG] Delay entre mensagens atualizado para ${delay}ms`);
+        } else if (cmd.startsWith('$pergunta=')) {
+            const parts = cmd.split('$resposta=');
+            if (parts.length !== 2) {
+                await msg.reply('[ERRO] Formato inválido. Use: $pergunta=Pergunta $resposta=Resposta');
+                return;
+            }
+            
+            const pergunta = parts[0].replace('$pergunta=', '').trim();
+            const resposta = parts[1].trim();
+            
+            if (!pergunta || !resposta) {
+                await msg.reply('[ERRO] Pergunta e resposta não podem estar vazias.');
+                return;
+            }
+            
+            const responses = loadResponses();
+            responses[pergunta] = resposta;
+            
+            if (saveResponses(responses)) {
+                await msg.reply(`[AUTO-RESPOSTA] Configurado: "${pergunta}" → "${resposta}"`);
+            }
+        } else if (cmd.startsWith('$removerpergunta=')) {
+            const pergunta = cmd.replace('$removerpergunta=', '').trim();
+            if (!pergunta) {
+                await msg.reply('[ERRO] Especifique a pergunta a ser removida.');
+                return;
+            }
+            
+            const responses = loadResponses();
+            if (responses.hasOwnProperty(pergunta)) {
+                delete responses[pergunta];
+                if (saveResponses(responses)) {
+                    await msg.reply(`[AUTO-RESPOSTA] Removido: "${pergunta}"`);
+                }
+            } else {
+                await msg.reply(`[AUTO-RESPOSTA] Pergunta "${pergunta}" não encontrada.`);
+            }
+        } else if (cmd === '$listarperguntas') {
+            const responses = loadResponses();
+            if (Object.keys(responses).length === 0) {
+                await msg.reply('[AUTO-RESPOSTA] Nenhuma pergunta configurada.');
+            } else {
+                let reply = '[AUTO-RESPOSTAS CONFIGURADAS]\n';
+                for (const [pergunta, resposta] of Object.entries(responses)) {
+                    reply += `- "${pergunta}" → "${resposta}"\n`;
+                }
+                await msg.reply(reply);
+            }
+        } else if (cmd === '$pause') {
+            if (!isSending) {
+                await msg.reply('[ERRO] Nenhum envio em andamento.');
+                return;
+            }
+            isPaused = true;
+            await msg.reply('[PAUSA] Envio pausado.');
+        } else if (cmd === '$resume') {
+            if (!isSending) {
+                await msg.reply('[ERRO] Nenhum envio em andamento.');
+                return;
+            }
+            isPaused = false;
+            await msg.reply('[RETOMAR] Envio continuando.');
+        } else if (cmd === '$status') {
+            if (!isSending) {
+                await msg.reply('[STATUS] Nenhum envio em andamento.');
+                return;
+            }
+            
+            const elapsed = ((new Date() - currentSending.startTime) / 1000).toFixed(1);
+            const progress = ((currentSending.sent + currentSending.failed) / currentSending.total * 100).toFixed(1);
+            
+            let reply = '[STATUS DO ENVIO]\n';
+            reply += `- Progresso: ${progress}%\n`;
+            reply += `- Tempo decorrido: ${elapsed}s\n`;
+            reply += `- Enviados: ${currentSending.sent}\n`;
+            reply += `- Falhas: ${currentSending.failed}\n`;
+            reply += `- Restantes: ${currentSending.total - currentSending.sent - currentSending.failed}\n`;
+            reply += `- Status: ${isPaused ? 'PAUSADO' : 'EM ANDAMENTO'}\n`;
+            reply += `- Delay atual: ${dynamicDelay}ms`;
+            
+            await msg.reply(reply);
+        } else if (cmd === '$updatecontacts') {
+            await updateContacts(client);
+            await msg.reply(`[CONTATOS] ${contatos.length} contatos carregados.`);
+        } else if (cmd === '$reconnect') {
+            await msg.reply('[RECONECTAR] Reiniciando conexão...');
+            try {
+                if (client) {
+                    await client.destroy().catch(err => {
+                        colorLog('warning', '[AVISO] Erro ao destruir cliente:', err.message);
+                    });
+                }
+                await delay(3000);
+                client = initializeClient();
+            } catch (err) {
+                await msg.reply('[ERRO CRÍTICO] Falha na reconexão.');
+            }
+        } else if (cmd === '$restart') {
+            await msg.reply('[REINICIAR] Reiniciando bot...');
+            gerarLogHTML();
+            exec(`node "${__filename}"`);
+            process.exit(0);
+        } else {
+            await msg.reply('[ERRO] Comando inválido. Digite $help para ajuda.');
         }
-        fs.rmSync(path.join(BASE_DIR, 'whatsapp-bot-session'), { 
-            recursive: true, 
-            force: true 
-        });
-        colorLog('success', '[SESSÃO] Limpeza completa da sessão anterior');
     } catch (err) {
-        colorLog('error', '[ERRO] Falha ao limpar sessão:', err);
+        await msg.reply(`[ERRO] Ocorreu um erro: ${err.message}`);
+        colorLog('error', '[ERRO] Ao processar comando admin:', err);
     }
+}
+
+// Funções para envio de mensagens
+async function enviarMensagemParaTodos(mensagem) {
+    await iniciarEnvio('message', mensagem, async (contato) => {
+        await client.sendMessage(contato.id, mensagem);
+    });
+}
+
+async function enviarArquivoParaTodos(filepath, nomeArquivo) {
+    const media = await criarMessageMedia(filepath, nomeArquivo);
+    await iniciarEnvio('file', nomeArquivo, async (contato) => {
+        await client.sendMessage(contato.id, media);
+    });
+}
+
+async function enviarMensagemArquivoParaTodos(mensagem, filepath, nomeArquivo) {
+    const media = await criarMessageMedia(filepath, nomeArquivo);
+    await iniciarEnvio('message+file', `${mensagem} + ${nomeArquivo}`, async (contato) => {
+        await client.sendMessage(contato.id, `*${mensagem}*`);
+        await delay(2000);
+        await client.sendMessage(contato.id, media);
+    });
+}
+
+async function criarMessageMedia(filepath, nomeArquivo) {
+    try {
+        const data = fs.readFileSync(filepath, { encoding: 'base64' });
+        const mimeType = mime.lookup(nomeArquivo) || 'application/octet-stream';
+        return new MessageMedia(mimeType, data, nomeArquivo);
+    } catch (err) {
+        colorLog('error', `[ERRO] Falha ao ler arquivo ${nomeArquivo}:`, err);
+        throw err;
+    }
+}
+
+async function iniciarEnvio(tipo, conteudo, sendFunction) {
+    const config = JSON.parse(fs.readFileSync(CONFIG_FILE));
+    let progress = JSON.parse(fs.readFileSync(PROGRESS_FILE));
+
+    isSending = true;
+    isPaused = false;
+    currentSending = { 
+        type: tipo, 
+        content: conteudo, 
+        total: contatos.length, 
+        sent: 0, 
+        failed: 0, 
+        startTime: new Date() 
+    };
+
+    colorLog('info', `\n[ENVIO] Iniciando: ${tipo} para ${contatos.length} contatos`);
+    colorLog('info', `[CONFIG] Delay entre mensagens: ${dynamicDelay}ms (ajuste automático)`);
+
+    for (let i = progress.lastIndex; i < contatos.length; i++) {
+        if (isPaused) {
+            i--;
+            await delay(1000);
+            continue;
+        }
+
+        try {
+            await sendFunction(contatos[i]);
+            currentSending.sent++;
+            dynamicDelay = Math.max(config.delayBetweenMessages, dynamicDelay * 0.9);
+            colorLog('success', `[✔] (${currentSending.sent}/${contatos.length}) ${contatos[i].name}`);
+        } catch (err) {
+            currentSending.failed++;
+            dynamicDelay = Math.min(config.maxDelay, dynamicDelay * 1.5);
+            colorLog('error', `[✖] Falha em ${contatos[i].name} → ${err.message} (Novo delay: ${dynamicDelay}ms)`);
+        }
+
+        progress.lastIndex = i + 1;
+        fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress));
+        await backupProgress();
+        await delay(dynamicDelay);
+    }
+
+    finalizarEnvio();
+}
+
+function finalizarEnvio() {
+    const elapsed = ((new Date() - currentSending.startTime) / 1000).toFixed(1);
+    colorLog('success', `\n[FINALIZADO] Envio concluído em ${elapsed} segundos.`);
+    console.log(`- Total: ${currentSending.total}`);
+    console.log(`- Enviados: ${currentSending.sent}`);
+    console.log(`- Falhas: ${currentSending.failed}`);
+    
+    fs.writeFileSync(PROGRESS_FILE, JSON.stringify({ lastIndex: 0 }));
+    gerarLogHTML();
+    isSending = false;
+    dynamicDelay = JSON.parse(fs.readFileSync(CONFIG_FILE)).delayBetweenMessages;
+}
+
+async function backupProgress() {
+    try {
+        const timestamp = moment().format('YYYY-MM-DD_HH-mm-ss');
+        const backupFile = path.join(BACKUP_DIR, `backup_${timestamp}.json`);
+        const backupData = {
+            config: JSON.parse(fs.readFileSync(CONFIG_FILE)),
+            contacts: contatos,
+            progress: JSON.parse(fs.readFileSync(PROGRESS_FILE)),
+            sendingStatus: currentSending,
+            responses: loadResponses(),
+            admins: loadAdmins()
+        };
+        
+        fs.writeFileSync(backupFile, JSON.stringify(backupData, null, 2));
+    } catch (err) {
+        colorLog('error', '[ERRO] Falha ao criar backup:', err);
+    }
+}
+
+function gerarLogHTML() {
+    const timestamp = moment().format('YYYY-MM-DD_HH-mm-ss');
+    const htmlPath = path.join(LOG_DIR, `log_${timestamp}.html`);
+    
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Log de Envios - ${timestamp}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { color: #075e54; }
+        .info { background: #f5f5f5; padding: 15px; border-radius: 5px; }
+        .stats { margin-top: 20px; }
+        .stat { display: inline-block; margin-right: 20px; }
+        .success { color: #25D366; }
+        .error { color: #FF0000; }
+    </style>
+</head>
+<body>
+    <h1>Relatório de Envios - WWW.TONCH.COM.BR</h1>
+    <div class="info">
+        <p><strong>Tipo:</strong> ${currentSending.type}</p>
+        <p><strong>Conteúdo:</strong> ${currentSending.content}</p>
+    </div>
+    
+    <div class="stats">
+        <div class="stat"><strong>Total:</strong> ${currentSending.total}</div>
+        <div class="stat success"><strong>Enviados:</strong> ${currentSending.sent}</div>
+        <div class="stat error"><strong>Falhas:</strong> ${currentSending.failed}</div>
+        <div class="stat"><strong>Início:</strong> ${currentSending.startTime.toLocaleString()}</div>
+        <div class="stat"><strong>Fim:</strong> ${new Date().toLocaleString()}</div>
+    </div>
+</body>
+</html>`;
+
+    fs.writeFileSync(htmlPath, html);
+    colorLog('success', `[LOG] Relatório salvo em ${path.basename(LOG_DIR)}/${path.basename(htmlPath)}`);
+}
+
+function showStatus() {
+    if (!isSending) {
+        colorLog('info', '[STATUS] Nenhum envio em andamento.');
+        return;
+    }
+    
+    const elapsed = ((new Date() - currentSending.startTime) / 1000).toFixed(1);
+    const progress = ((currentSending.sent + currentSending.failed) / currentSending.total * 100).toFixed(1);
+    
+    colorLog('info', '\n[STATUS DO ENVIO]');
+    console.log(`- Progresso: ${progress}%`);
+    console.log(`- Tempo decorrido: ${elapsed}s`);
+    console.log(`- Enviados: ${currentSending.sent}`);
+    console.log(`- Falhas: ${currentSending.failed}`);
+    console.log(`- Restantes: ${currentSending.total - currentSending.sent - currentSending.failed}`);
+    console.log(`- Status: ${isPaused ? 'PAUSADO' : 'EM ANDAMENTO'}`);
+    console.log(`- Delay atual: ${dynamicDelay}ms`);
+}
+
+function showHelp() {
+    console.log(`
+╔════════════════════════════════════════════╗
+║          WHATSAPP BOT - COMANDOS           ║
+╠════════════════════════════════════════════╣
+║  $global=mensagem           → Envia msg    ║
+║  $global=mensagem + arq.ext → Msg + arquivo║
+║  $file=arquivo.ext          → Envia arquivo║
+║  $delay=XXXX                → Altera delay ║
+╠════════════════════════════════════════════╣
+║  $pergunta=Pergunta $resposta=Resposta     ║
+║  $removerpergunta=Pergunta  → Remove resp. ║
+║  $listarperguntas           → Lista resp.  ║
+╠════════════════════════════════════════════╣
+║  $manageadmins       → Gerenciar admins    ║
+╠════════════════════════════════════════════╣
+║  $pause          → Pausa envio             ║
+║  $resume         → Retoma envio            ║
+║  $status         → Mostra status           ║
+║  $standby        → Modo espera             ║
+╠════════════════════════════════════════════╣
+║  $updatecontacts → Atualiza contatos       ║
+║  $openfiles      → Abre pasta de arquivos  ║
+║  $listfiles      → Lista arquivos          ║
+╠════════════════════════════════════════════╣
+║  $reconnect      → Reconecta ao WhatsApp   ║
+║  $logout         → Sai da sessão atual     ║
+║  $showqr         → Mostra QR code novamente║
+║  $autoreconnect  → Ativa/desativa auto-recon
+╠════════════════════════════════════════════╣
+║  $restart        → Reinicia o bot          ║
+║  $shutdown       → Encerra o bot           ║
+║  $help           → Mostra esta ajuda       ║
+║  clear/cls       → Limpa a tela            ║
+╚════════════════════════════════════════════╝
+`);
+}
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // Interface de linha de comando
@@ -220,7 +732,9 @@ rl.on('line', async input => {
     const cmd = input.trim().toLowerCase();
 
     try {
-        if (cmd.startsWith('$global=')) {
+        if (cmd === '$manageadmins') {
+            await manageAdmins();
+        } else if (cmd.startsWith('$global=')) {
             if (!clientReady) return colorLog('error', '[ERRO] Aguarde a conexão com WhatsApp.');
             
             const data = cmd.replace('$global=', '').trim();
@@ -394,226 +908,6 @@ rl.on('line', async input => {
     process.exit(0);
 });
 
-// Funções principais
-async function updateContacts(clientInstance = client) {
-    try {
-        const chats = await clientInstance.getChats();
-        contatos = chats.filter(c => !c.isGroup && !c.archived)
-            .map(c => ({ id: c.id._serialized, name: c.name || c.id.user }));
-        colorLog('success', `[CONTATOS] ${contatos.length} contatos carregados.`);
-    } catch (error) {
-        colorLog('error', '[ERRO] Falha ao buscar contatos:', error);
-    }
-}
-
-async function enviarMensagemParaTodos(mensagem) {
-    await iniciarEnvio('message', mensagem, async (contato) => {
-        await client.sendMessage(contato.id, mensagem);
-    });
-}
-
-async function enviarArquivoParaTodos(filepath, nomeArquivo) {
-    const media = await criarMessageMedia(filepath, nomeArquivo);
-    await iniciarEnvio('file', nomeArquivo, async (contato) => {
-        await client.sendMessage(contato.id, media);
-    });
-}
-
-async function enviarMensagemArquivoParaTodos(mensagem, filepath, nomeArquivo) {
-    const media = await criarMessageMedia(filepath, nomeArquivo);
-    await iniciarEnvio('message+file', `${mensagem} + ${nomeArquivo}`, async (contato) => {
-        await client.sendMessage(contato.id, `*${mensagem}*`);
-        await delay(2000);
-        await client.sendMessage(contato.id, media);
-    });
-}
-
-async function criarMessageMedia(filepath, nomeArquivo) {
-    try {
-        const data = fs.readFileSync(filepath, { encoding: 'base64' });
-        const mimeType = mime.lookup(nomeArquivo) || 'application/octet-stream';
-        return new MessageMedia(mimeType, data, nomeArquivo);
-    } catch (err) {
-        colorLog('error', `[ERRO] Falha ao ler arquivo ${nomeArquivo}:`, err);
-        throw err;
-    }
-}
-
-async function iniciarEnvio(tipo, conteudo, sendFunction) {
-    const config = JSON.parse(fs.readFileSync(CONFIG_FILE));
-    let progress = JSON.parse(fs.readFileSync(PROGRESS_FILE));
-
-    isSending = true;
-    isPaused = false;
-    currentSending = { 
-        type: tipo, 
-        content: conteudo, 
-        total: contatos.length, 
-        sent: 0, 
-        failed: 0, 
-        startTime: new Date() 
-    };
-
-    colorLog('info', `\n[ENVIO] Iniciando: ${tipo} para ${contatos.length} contatos`);
-    colorLog('info', `[CONFIG] Delay entre mensagens: ${dynamicDelay}ms (ajuste automático)`);
-
-    for (let i = progress.lastIndex; i < contatos.length; i++) {
-        if (isPaused) {
-            i--;
-            await delay(1000);
-            continue;
-        }
-
-        try {
-            await sendFunction(contatos[i]);
-            currentSending.sent++;
-            dynamicDelay = Math.max(config.delayBetweenMessages, dynamicDelay * 0.9);
-            colorLog('success', `[✔] (${currentSending.sent}/${contatos.length}) ${contatos[i].name}`);
-        } catch (err) {
-            currentSending.failed++;
-            dynamicDelay = Math.min(config.maxDelay, dynamicDelay * 1.5);
-            colorLog('error', `[✖] Falha em ${contatos[i].name} → ${err.message} (Novo delay: ${dynamicDelay}ms)`);
-        }
-
-        progress.lastIndex = i + 1;
-        fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress));
-        await backupProgress();
-        await delay(dynamicDelay);
-    }
-
-    finalizarEnvio();
-}
-
-function finalizarEnvio() {
-    const elapsed = ((new Date() - currentSending.startTime) / 1000).toFixed(1);
-    colorLog('success', `\n[FINALIZADO] Envio concluído em ${elapsed} segundos.`);
-    console.log(`- Total: ${currentSending.total}`);
-    console.log(`- Enviados: ${currentSending.sent}`);
-    console.log(`- Falhas: ${currentSending.failed}`);
-    
-    fs.writeFileSync(PROGRESS_FILE, JSON.stringify({ lastIndex: 0 }));
-    gerarLogHTML();
-    isSending = false;
-    dynamicDelay = JSON.parse(fs.readFileSync(CONFIG_FILE)).delayBetweenMessages;
-}
-
-async function backupProgress() {
-    try {
-        const timestamp = moment().format('YYYY-MM-DD_HH-mm-ss');
-        const backupFile = path.join(BACKUP_DIR, `backup_${timestamp}.json`);
-        const backupData = {
-            config: JSON.parse(fs.readFileSync(CONFIG_FILE)),
-            contacts: contatos,
-            progress: JSON.parse(fs.readFileSync(PROGRESS_FILE)),
-            sendingStatus: currentSending,
-            responses: loadResponses()
-        };
-        
-        fs.writeFileSync(backupFile, JSON.stringify(backupData, null, 2));
-    } catch (err) {
-        colorLog('error', '[ERRO] Falha ao criar backup:', err);
-    }
-}
-
-function gerarLogHTML() {
-    const timestamp = moment().format('YYYY-MM-DD_HH-mm-ss');
-    const htmlPath = path.join(LOG_DIR, `log_${timestamp}.html`);
-    
-    const html = `
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Log de Envios - ${timestamp}</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        h1 { color: #075e54; }
-        .info { background: #f5f5f5; padding: 15px; border-radius: 5px; }
-        .stats { margin-top: 20px; }
-        .stat { display: inline-block; margin-right: 20px; }
-        .success { color: #25D366; }
-        .error { color: #FF0000; }
-    </style>
-</head>
-<body>
-    <h1>Relatório de Envios - WWW.TONCH.COM.BR</h1>
-    <div class="info">
-        <p><strong>Tipo:</strong> ${currentSending.type}</p>
-        <p><strong>Conteúdo:</strong> ${currentSending.content}</p>
-    </div>
-    
-    <div class="stats">
-        <div class="stat"><strong>Total:</strong> ${currentSending.total}</div>
-        <div class="stat success"><strong>Enviados:</strong> ${currentSending.sent}</div>
-        <div class="stat error"><strong>Falhas:</strong> ${currentSending.failed}</div>
-        <div class="stat"><strong>Início:</strong> ${currentSending.startTime.toLocaleString()}</div>
-        <div class="stat"><strong>Fim:</strong> ${new Date().toLocaleString()}</div>
-    </div>
-</body>
-</html>`;
-
-    fs.writeFileSync(htmlPath, html);
-    colorLog('success', `[LOG] Relatório salvo em ${path.basename(LOG_DIR)}/${path.basename(htmlPath)}`);
-}
-
-function showStatus() {
-    if (!isSending) {
-        colorLog('info', '[STATUS] Nenhum envio em andamento.');
-        return;
-    }
-    
-    const elapsed = ((new Date() - currentSending.startTime) / 1000).toFixed(1);
-    const progress = ((currentSending.sent + currentSending.failed) / currentSending.total * 100).toFixed(1);
-    
-    colorLog('info', '\n[STATUS DO ENVIO]');
-    console.log(`- Progresso: ${progress}%`);
-    console.log(`- Tempo decorrido: ${elapsed}s`);
-    console.log(`- Enviados: ${currentSending.sent}`);
-    console.log(`- Falhas: ${currentSending.failed}`);
-    console.log(`- Restantes: ${currentSending.total - currentSending.sent - currentSending.failed}`);
-    console.log(`- Status: ${isPaused ? 'PAUSADO' : 'EM ANDAMENTO'}`);
-    console.log(`- Delay atual: ${dynamicDelay}ms`);
-}
-
-function showHelp() {
-    console.log(`
-╔════════════════════════════════════════════╗
-║          WHATSAPP BOT - COMANDOS           ║
-╠════════════════════════════════════════════╣
-║  $global=mensagem           → Envia msg    ║
-║  $global=mensagem + arq.ext → Msg + arquivo║
-║  $file=arquivo.ext          → Envia arquivo║
-║  $delay=XXXX                → Altera delay ║
-╠════════════════════════════════════════════╣
-║  $pergunta=Pergunta $resposta=Resposta     ║
-║  $removerpergunta=Pergunta  → Remove resp. ║
-║  $listarperguntas           → Lista resp.  ║
-╠════════════════════════════════════════════╣
-║  $pause          → Pausa envio             ║
-║  $resume         → Retoma envio            ║
-║  $status         → Mostra status           ║
-║  $standby        → Modo espera             ║
-╠════════════════════════════════════════════╣
-║  $updatecontacts → Atualiza contatos       ║
-║  $openfiles      → Abre pasta de arquivos  ║
-║  $listfiles      → Lista arquivos          ║
-╠════════════════════════════════════════════╣
-║  $reconnect      → Reconecta ao WhatsApp   ║
-║  $logout         → Sai da sessão atual     ║
-║  $showqr         → Mostra QR code novamente║
-║  $autoreconnect  → Ativa/desativa auto-recon
-╠════════════════════════════════════════════╣
-║  $restart        → Reinicia o bot          ║
-║  $shutdown       → Encerra o bot           ║
-║  $help           → Mostra esta ajuda       ║
-║  clear/cls       → Limpa a tela            ║
-╚════════════════════════════════════════════╝
-`);
-}
-
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 // Tratamento de erros globais
 process.on('unhandledRejection', (reason, promise) => {
     colorLog('error', '[ERRO NÃO TRATADO]', reason);
@@ -636,7 +930,7 @@ console.log(`
 ╔════════════════════════════════════════════╗
 ║          WHATSAPP BOT - INICIANDO          ║
 ╠════════════════════════════════════════════╣
-║  Versão: 2.0 - www.tonch.com.br            ║
+║  Versão: 3.0 - www.tonch.com.br            ║
 ║  Diretório base: ${path.basename(BASE_DIR)}          ║
 ║  Arquivos: whatsapp-bot-files/             ║
 ║  Logs: whatsapp-bot-logs/                  ║
