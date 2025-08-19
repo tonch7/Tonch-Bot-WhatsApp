@@ -1217,4 +1217,3 @@ admins = loadAdmins();
 client = initializeClient();
 startScheduleLoop();
 rl.prompt();
-
