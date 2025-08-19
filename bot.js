@@ -1,6 +1,3 @@
-// bot.js — TonchB0T (versão VPS/Headless/Antispam)
-
-// === DEPENDÊNCIAS ===
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
@@ -1220,3 +1217,4 @@ admins = loadAdmins();
 client = initializeClient();
 startScheduleLoop();
 rl.prompt();
+
